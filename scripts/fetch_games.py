@@ -1,4 +1,3 @@
-import argparse
 import json
 import os
 import sys
@@ -15,12 +14,12 @@ API_HOST = "opencritic-api.p.rapidapi.com"
 
 # --- Configuration ---
 PLATFORMS = "pc"
-SCORE_THRESHOLD = 80         # Minimum Top Critic Score (matched against OpenCritic's rounded score)
-MIN_REVIEWS = 0              # Set e.g. 10 or 15 to filter out lightly reviewed titles
-LOOKBACK_DAYS = 90           # Rolling release window
+SCORE_THRESHOLD = 80         # Matches OpenCritic's rounded score badge
+MIN_REVIEWS = 0              # Raise (e.g., 10 or 15) to filter low-review-count games
+LOOKBACK_DAYS = 90           # Upper date bound if release volume slows down
 PAGE_SIZE = 20               # OpenCritic returns 20 games per page
-MAX_PAGES = 20               # ~10 pages covers 90 days; 20 gives comfortable headroom
-MAX_FEED_ITEMS = 50          # Rolling RSS window (deduped by GUID)
+MAX_PAGES = 3                # 3 pages/day = max 93 req/mo (use 2 for 62 req/mo)
+MAX_FEED_ITEMS = 50          # Rolling RSS window (reader dedupes by GUID)
 
 STATE_PATH = Path("state/seen_ids.json")
 FEED_PATH = Path("docs/feed.xml")
@@ -68,11 +67,7 @@ def fetch_qualifying_games(api_key: str) -> list[dict]:
         reached_cutoff = False
         for game in batch:
             release_dt = parse_iso_date(game.get("firstReleaseDate"))
-            if not release_dt:
-                continue
-
-            # Skip upcoming/unreleased games (e.g., next few days)
-            if release_dt > now:
+            if not release_dt or release_dt > now:
                 continue
 
             if release_dt < cutoff:
@@ -82,7 +77,6 @@ def fetch_qualifying_games(api_key: str) -> list[dict]:
             raw_score = game.get("topCriticScore")
             num_reviews = game.get("numReviews") or 0
 
-            # OpenCritic returns -1 when there aren't enough reviews for a score
             if raw_score is None or raw_score < 0:
                 continue
             if round(float(raw_score)) < SCORE_THRESHOLD:
@@ -95,8 +89,8 @@ def fetch_qualifying_games(api_key: str) -> list[dict]:
         if reached_cutoff:
             break
 
-        # Stay well below RapidAPI's 4 req/sec limit
-        time.sleep(0.35)
+        if page < MAX_PAGES - 1:
+            time.sleep(0.35)
 
     return matches
 
@@ -108,8 +102,7 @@ def build_rss(state: dict[str, dict]) -> str:
     ET.SubElement(channel, "title").text = f"OpenCritic PC Releases ({SCORE_THRESHOLD}+)"
     ET.SubElement(channel, "link").text = "https://opencritic.com/browse/pc/last90"
     ET.SubElement(channel, "description").text = (
-        f"PC releases from the last {LOOKBACK_DAYS} days scoring "
-        f"{SCORE_THRESHOLD}+ on OpenCritic."
+        f"Recent PC releases scoring {SCORE_THRESHOLD}+ on OpenCritic."
     )
     ET.SubElement(channel, "lastBuildDate").text = format_datetime(datetime.now(timezone.utc))
 
@@ -151,14 +144,6 @@ def build_rss(state: dict[str, dict]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--seed",
-        action="store_true",
-        help="Record current qualifying games in state without writing them to the RSS feed.",
-    )
-    args = parser.parse_args()
-
     api_key = os.environ.get("RAPIDAPI_KEY")
     if not api_key:
         sys.exit("Error: RAPIDAPI_KEY environment variable is not set.")
@@ -176,11 +161,10 @@ def main() -> None:
         if gid in state:
             continue
 
-        name = g.get("name", f"Game {gid}")
         release_dt = parse_iso_date(g.get("firstReleaseDate"))
         state[gid] = {
             "id": gid,
-            "name": name,
+            "name": g.get("name", f"Game {gid}"),
             "score": round(float(g["topCriticScore"]), 1),
             "percent_recommended": g.get("percentRecommended"),
             "num_reviews": g.get("numReviews", 0),
@@ -188,7 +172,6 @@ def main() -> None:
             "release_date": release_dt.strftime("%Y-%m-%d") if release_dt else "Unknown",
             "url": g.get("url") or f"https://opencritic.com/game/{gid}",
             "discovered_at": now_iso,
-            "seeded": args.seed,
         }
         new_count += 1
 
@@ -201,9 +184,8 @@ def main() -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
-    feed_items = {k: v for k, v in state.items() if not v.get("seeded")}
     FEED_PATH.parent.mkdir(parents=True, exist_ok=True)
-    FEED_PATH.write_text(build_rss(feed_items), encoding="utf-8")
+    FEED_PATH.write_text(build_rss(state), encoding="utf-8")
 
 
 if __name__ == "__main__":
