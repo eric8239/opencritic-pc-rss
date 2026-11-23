@@ -2,7 +2,7 @@ name: Update OpenCritic PC RSS Feed
 
 on:
   schedule:
-    - cron: "0 14 * * *"
+    - cron: "17 14 * * *"
   workflow_dispatch:
 
 permissions:
