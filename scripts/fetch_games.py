@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import sys
@@ -11,6 +12,7 @@ from pathlib import Path
 
 API_URL = "https://opencritic-api.p.rapidapi.com/game"
 API_HOST = "opencritic-api.p.rapidapi.com"
+IMG_BASE_URL = "https://img.opencritic.com/"
 
 # --- Configuration ---
 PLATFORMS = "pc"
@@ -52,6 +54,18 @@ def parse_iso_date(value: str | None) -> datetime | None:
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def extract_image_url(game: dict) -> str:
+    images = game.get("images") or {}
+    # Prefer wide banner art; fall back to box art if banner is missing
+    for kind in ("banner", "box"):
+        variant = images.get(kind) or {}
+        for size in ("og", "sm"):
+            path = variant.get(size)
+            if path and "undefined" not in path:
+                return f"{IMG_BASE_URL}{path.lstrip('/')}"
+    return ""
 
 
 def fetch_qualifying_games(api_key: str) -> list[dict]:
@@ -96,7 +110,13 @@ def fetch_qualifying_games(api_key: str) -> list[dict]:
 
 
 def build_rss(state: dict[str, dict]) -> str:
-    rss = ET.Element("rss", version="2.0")
+    rss = ET.Element(
+        "rss",
+        {
+            "version": "2.0",
+            "xmlns:media": "http://search.yahoo.com/mrss/",
+        },
+    )
     channel = ET.SubElement(rss, "channel")
 
     ET.SubElement(channel, "title").text = f"OpenCritic PC Releases ({SCORE_THRESHOLD}+)"
@@ -132,10 +152,28 @@ def build_rss(state: dict[str, dict]) -> str:
         pub_dt = datetime.fromisoformat(g["discovered_at"])
         ET.SubElement(item, "pubDate").text = format_datetime(pub_dt)
 
-        ET.SubElement(item, "description").text = (
+        summary_text = html.escape(
             f"Top Critic Score: {display_score}{tier}{rec}{reviews}. "
             f"Release Date: {g['release_date']}."
         )
+
+        image_url = g.get("image", "")
+        if image_url:
+            safe_img = html.escape(image_url, quote=True)
+            safe_alt = html.escape(g["name"], quote=True)
+            description_html = (
+                f'<p><img src="{safe_img}" alt="{safe_alt}" /></p>'
+                f"<p>{summary_text}</p>"
+            )
+            ET.SubElement(
+                item,
+                "media:content",
+                {"url": image_url, "medium": "image"},
+            )
+        else:
+            description_html = f"<p>{summary_text}</p>"
+
+        ET.SubElement(item, "description").text = description_html
 
     ET.indent(rss, space="  ")
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
@@ -171,6 +209,7 @@ def main() -> None:
             "tier": g.get("tier", ""),
             "release_date": release_dt.strftime("%Y-%m-%d") if release_dt else "Unknown",
             "url": g.get("url") or f"https://opencritic.com/game/{gid}",
+            "image": extract_image_url(g),
             "discovered_at": now_iso,
         }
         new_count += 1
